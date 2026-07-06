@@ -50,8 +50,8 @@ class Miner(BaseMinerNeuron):
             repo_root=repo_root,
             implementation_files=implementation_files,
             defaults={
-                "model_name": "poker7-ensemble-v3",
-                "model_version": "3",
+                "model_name": "poker111-linblend-v113",
+                "model_version": "1",
                 "framework": "scikit-learn-ensemble",
                 "license": "MIT",
                 "repo_url": "",
