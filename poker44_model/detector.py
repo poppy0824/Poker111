@@ -1,24 +1,25 @@
-"""Poker44 bot detector — C2 + linear-head BLEND (poker-c2-linblend).
+"""Poker44 bot detector — pure-tree candidate `poker-lgb-tuned`.
 
-Model: a proba-average BLEND of
-  (a) the C2 ExtraTrees + HistGradientBoosting soft-vote ensemble (keeps C2's
-      benchmark discrimination), and
-  (b) an L1-LogisticRegression on StandardScaler(C2 feats) — a LOW-VARIANCE head
-      that transfers to the validator-sanitized live population far better than
-      the deep trees (which overfit benchmark idiosyncrasy).
-score = 0.6 * C2_proba + 0.4 * linear_proba. See blend_model.Blend / train_blend.py.
+Model: a **tuned LightGBM gradient-boosted tree** (LGBMClassifier, ~800 trees,
+depth 6-8 / num_leaves 63, lr 0.02, subsample/colsample 0.8, L1+L2 reg) over the
+SAME 180 sanitization-invariant C2 features (cross-hand duplication `sig_*`,
+entropies, structural / aggression aggregates — see features.py FEATURE_NAMES).
 
-Everything else is C2 verbatim: the 180 sanitization-invariant features
-(features.py), training on hands passed through prepare_hand_for_miner
-(train==serve), and WITHIN-BATCH RANK output (matches the ranking-based reward).
+This is a PURE GBDT — **no linear head**. New-eval LIVE rounds (R1+R2, 2026-07-07)
+showed the L1-logistic head in the linblend miners caps out ~0.40 while pure-tree
+scoring reaches 0.55; the linear head hurts ~0.15 under the new eval. lgb_tuned is
+the pack's common strong learner in that pure-tree regime, as a distinct-from-C2
+(ExtraTrees+HGB) diversification of the tree family.
 
 IMPORTANT — inference does NOT sanitize. Live chunks arrive already sanitized by
-the validator (prepare_hand_for_miner runs validator-side, per hand). Only
-TRAINING sanitizes raw benchmark hands. Sanitizing again here would
-double-transform, so this path featurizes the incoming chunks directly.
+the validator (prepare_hand_for_miner runs validator-side, per hand); only
+TRAINING sanitizes raw benchmark hands (see train_model.py). Featurize incoming
+chunks directly. Output = **within-batch rank** in [0,1] (higher = more bot-like),
+matching the validator's ranking-based reward.
 
-The trained blend is the committed `model.joblib` (a poker44_model.blend_model.Blend).
-`score_batch(chunks)` returns one rank-based bot-risk score in [0,1] per chunk.
+LightGBM predict is single-threaded here (num_threads=1 baked into the booster at
+train time) so batched predict cannot deadlock the axon. The trained model is the
+committed `model.joblib`; joblib/lightgbm load it at inference.
 """
 from __future__ import annotations
 
@@ -28,8 +29,6 @@ import numpy as np
 import joblib
 
 from poker44_model.features import chunk_features, FEATURE_NAMES
-# Registering the module so joblib can resolve poker44_model.blend_model.Blend on load.
-from poker44_model import blend_model  # noqa: F401
 
 _MODEL = None
 
