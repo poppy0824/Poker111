@@ -38,8 +38,6 @@ class Miner(BaseMinerNeuron):
             repo_root / "poker44_model" / "__init__.py",
             repo_root / "poker44_model" / "detector.py",
             repo_root / "poker44_model" / "features.py",
-            repo_root / "poker44_model" / "mlp_bag.py",
-            repo_root / "poker44_model" / "mlp_member.py",
             repo_root / "poker44_model" / "model.joblib",
             repo_root / "poker44_model" / "capture.py",
         ]
@@ -51,12 +49,12 @@ class Miner(BaseMinerNeuron):
             repo_root=repo_root,
             implementation_files=implementation_files,
             defaults={
-                "model_name": "poker111-mlp",
-                "model_version": "3",
-                "framework": "pytorch-mlp-ensemble",
+                "model_name": "poker111-ens",
+                "model_version": "5",
+                "framework": "lightgbm+sklearn-ensemble",
                 "license": "MIT",
                 "repo_url": "",
-                "notes": "Logistic-regression bot detector over behavioral features (poker44_model/).",
+                "notes": "Within-batch rank-fused ensemble (stacked GBDT / sign-stable monotone GBDT / PCA-MLP) over sanitization-invariant behavioral features (poker44_model/).",
                 "open_source": True,
                 "inference_mode": "remote",
                 "training_data_statement": (
