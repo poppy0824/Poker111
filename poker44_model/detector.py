@@ -28,13 +28,27 @@ Members (all over the identical 610-dim UNION row)
 Fusion is calibration-free: each member's WITHIN-BATCH rank (argsort/argsort/(n-1))
 averaged 0.35/0.30/0.35, so no member's OOD score-scale distorts the blend.
 
-Decision layer (reused verbatim from the prior BEATER / BEST/GAP_FIX)
---------------------------------------------------------------------
-Fused rank -> isotonic -> per-batch anchor-quantile logit recenter + margin/temp +
-hard FLOOR + CAP (Q=0.7, MARGIN=3.0, TEMP=1.0, FLOOR=0.02, CAP=True) => a
-deterministic ~2% of every window crosses 0.5, zero hard-zeros. Monotone, so the
-65% rank block is set by the fused rank while the 30% hard-0.5-threshold block
-stays pinned high.
+Decision layer (STRICTLY MONOTONE; isotonic removed 2026-07-15)
+---------------------------------------------------------------
+The fused within-batch rank goes straight into the reward-fit per-batch decision
+layer (anchor quantile Q + logit margin/temp + FLOOR + CAP), which SHIFTS each side
+of the 0.5 line instead of clamping it -> the map fused -> served is strictly
+monotone, so the served order IS the fused order and AP / recall@FPR (the 65% block)
+are set purely by the fused rank.
+
+Two corrections vs the previous version, both measured on live captures:
+  * The isotonic map is GONE. It is monotone but NON-INJECTIVE, so it merged the
+    fused rank into ~22 distinct levels per 100-chunk window and put the
+    recall@FPR<=0.05 boundary inside a tie group. The old claim that the transform
+    was "monotone, so AP/recall are set purely by the fused rank" was FALSE.
+  * FLOOR is 0.10, not 0.02. The old claim of "zero hard-zeros" was ALSO FALSE:
+    FLOOR guarantees that k chunks CROSS 0.5, not that any of them is a BOT.
+    scoring.py zeroes the WHOLE round when no true bot crosses, and with k=2 the
+    crossing set was decided by array index inside the isotonic tie plateau
+    (index-arbitrary in 17-18 of 18 live windows) -- which produced uid212 R3 =
+    0.000, uid236 R2 = 0.000, and uid236's ~0.077 epoch.
+k = ceil(FLOOR*n) chunks cross 0.5; at n=100 that is 10, matching the 10% FPR
+budget where threshold_sanity_quality is still 1.0.
 
 IMPORTANT -- inference does NOT sanitize (live chunks arrive already sanitized by
 the validator). Only offline training sanitized the raw benchmark hands. All
@@ -127,26 +141,58 @@ def _logit(p, eps):
     return np.log(p / (1.0 - p))
 
 
-def _calibrated(model, fused):
-    return model["iso"].predict(np.asarray(fused, dtype=float))
+_T_HI = 0.00040000000000000002   # logit(0.5001): sigmoid(t) >= 0.5001 <=> t >= _T_HI
+_T_LO = -0.00040000000000000002  # logit(0.4999): sigmoid(t) <= 0.4999 <=> t <= _T_LO
 
 
-def _decision(model, cal):
-    eps = float(model["EPS"]); q = float(model["Q"])
-    margin = float(model["MARGIN"]); temp = float(model.get("TEMP", 1.0))
-    floor = float(model["FLOOR"]); cap = bool(model.get("CAP", False))
+def _decision(model, v):
+    """Reward-fit, FPR-capped per-batch decision layer on the TIE-FREE fused rank.
+
+    Identical to the deployed layer (same Q / MARGIN / TEMP / FLOOR / CAP / EPS /
+    train_ref_logit, same k, same crossing count) except for two tie sources that
+    were destroying the 65% rank block (0.35*AP + 0.30*recall@FPR<=0.05, both of
+    which argsort the served scores and break ties by ARRAY INDEX):
+
+      1. the isotonic map is GONE -- it is monotone but NON-INJECTIVE, so it
+         merged the fused rank into ~26 distinct levels per 100-chunk window and
+         put the recall@FPR<=0.05 boundary INSIDE a tie group;
+      2. FLOOR/CAP now SHIFT each side instead of CLAMPing it to the constants
+         0.5001 / 0.4999, which preserves the internal spacing of both groups.
+
+    The result is a STRICTLY MONOTONE map fused -> served score, so the served
+    order is exactly the model's order, while k = ceil(FLOOR*n) chunks still
+    cross 0.5 (FLOOR lifts the top-k, CAP pins the rest below) -- the 30%
+    hard-0.5-threshold block is unchanged.
+    """
+    eps = float(model["EPS"])
+    q = float(model["Q"])
+    margin = float(model["MARGIN"])
+    temp = float(model.get("TEMP", 1.0))
+    floor = float(model["FLOOR"])
+    cap = bool(model.get("CAP", False))
     tref = float(model["train_ref_logit"]) - margin
-    z = _logit(cal, eps)
+    z = _logit(v, eps)
     if z.size == 0:
         return []
     anchor = np.quantile(z, q)
-    scores = 1.0 / (1.0 + np.exp(-((z - anchor + tref) / temp)))
+    t = (z - anchor + tref) / temp
     order = np.argsort(-z, kind="mergesort")
-    k = max(1, int(np.ceil(floor * len(scores))))
-    scores[order[:k]] = np.maximum(scores[order[:k]], 0.5001)
-    if cap:
-        scores[order[k:]] = np.minimum(scores[order[k:]], 0.4999)
-    return [round(float(s), 6) for s in scores]
+    k = max(1, int(np.ceil(floor * len(t))))
+    top, rest = order[:k], order[k:]
+    # FLOOR (tie-free): shift the top-k as a block so its MINIMUM sits at 0.5001
+    # -- never an all-below-0.5 hard zero, but the spacing inside the block (and
+    # hence the ordering that AP / bot-recall read) survives.
+    d = _T_HI - t[top].min()
+    if d > 0.0:
+        t[top] = t[top] + d
+    if cap and rest.size:
+        # CAP (tie-free): shift the rest as a block so its MAXIMUM sits at 0.4999
+        # -> deterministic crossing count k, spacing preserved.
+        d = t[rest].max() - _T_LO
+        if d > 0.0:
+            t[rest] = t[rest] - d
+    scores = 1.0 / (1.0 + np.exp(-t))
+    return [round(float(s), 9) for s in scores]
 
 
 def score_batch(chunks):
@@ -156,7 +202,7 @@ def score_batch(chunks):
         return []
     try:
         m = _model()
-        return _decision(m, _calibrated(m, _fused_rank(m, chunks)))
+        return _decision(m, _fused_rank(m, chunks))
     except Exception:
         return [0.5] * len(chunks)
 
