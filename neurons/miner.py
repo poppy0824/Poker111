@@ -51,12 +51,12 @@ class Miner(BaseMinerNeuron):
             repo_root=repo_root,
             implementation_files=implementation_files,
             defaults={
-                "model_name": "poker111-union",
+                "model_name": "poker111-vote",
                 "model_version": "7",
                 "framework": "lightgbm+sklearn-ensemble",
                 "license": "MIT",
                 "repo_url": "",
-                "notes": "Within-batch rank-fused ensemble (stacked GBDT / sign-stable monotone GBDT / PCA-MLP) over a 452-dim transfer-stable (drops OOD raw-magnitude cols) order-statistic + behavioral chunk features (poker44_model/).",
+                "notes": "Soft-voting ExtraTrees+RandomForest+HistGradientBoosting ensemble over 180 sanitization-invariant behavioral features (poker44_model/); strictly-monotone reward-fit decision layer, deterministic top-10% crossing, no isotonic calibration.",
                 "open_source": True,
                 "inference_mode": "remote",
                 "training_data_statement": (
